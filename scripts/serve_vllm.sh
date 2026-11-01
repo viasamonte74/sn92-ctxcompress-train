@@ -16,5 +16,4 @@ exec vllm serve "$MODEL" \
   --max-model-len 125952 \
   --seed 0 \
   --gpu-memory-utilization "${GPU_UTIL:-0.85}" \
-  --disable-log-requests \
   "$@"
