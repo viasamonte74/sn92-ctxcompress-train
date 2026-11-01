@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Serve a model the way the official engine image does for the SLM pool:
+# batch invariant mode, seed 0, the arena's context (122,880 in + 3,072 out), served as "slm".
+#   scripts/serve_vllm.sh MODEL_DIR [PORT] [extra vllm args, e.g. --quantization gptq_marlin]
+set -euo pipefail
+MODEL=${1:?model folder}
+PORT=${2:-8000}
+shift $(( $# >= 2 ? 2 : $# ))
+export VLLM_BATCH_INVARIANT=1 VLLM_NO_USAGE_STATS=1
+exec vllm serve "$MODEL" \
+  --served-model-name slm \
+  --host 127.0.0.1 --port "$PORT" \
+  --max-model-len 125952 \
+  --seed 0 \
+  --gpu-memory-utilization "${GPU_UTIL:-0.85}" \
+  --disable-log-requests \
+  "$@"

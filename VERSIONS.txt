@@ -1,0 +1,6 @@
+Pinned sibling repositories (unzip keeps them next to ctx-compress-slm):
+microtensor-arenas 5532b16b5f18b4ea66f1a9f9758f3dcf6f4afaa1 2026-11-01
+microtensor-subnet 9a577a0a9b9ccb638b361b4c24a660ec94d20443 2026-11-01
+microtensor-miner-template 8e4f02e2f8e910161247dd0f7f4b66f62afdc617 2026-10-30
+
+Data is not in the zip: build it with `python -m ccslm.pipeline --stages data,targets` (seeds ccslm-train / ccslm-val / ccslm-test).
