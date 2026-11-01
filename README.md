@@ -80,7 +80,8 @@ ccslm/targets.py    nine-heading targets, budget trimming, grader checks, {promp
 ccslm/probe.py      the probe agent: validator prompt; llama.cpp/OpenAI server or transformers
 ccslm/grade.py      SLM pool grading and statistics: pass rate, Wilson LB, twin factor, paired LB, S_slm estimate
 ccslm/generate.py   vLLM client like the SLM pool, with TTFT/TPOT; the envelope rule
-ccslm/train.py      long-context SFT (LoRA, or full with fp32 master weights and 8-bit moments), checkpoints and resume, merge, export
+ccslm/train.py      long-context SFT (LoRA, or full with fp32 master weights and 8-bit moments), numbered checkpoints and resume, merge
+ccslm/export.py     merge any numbered checkpoint into a servable model (`--list`, `--step N`)
 ccslm/prune.py      block-influence scores, Mamba layer cut (never layers 0-7 or attention), fingerprint report
 ccslm/quantize.py   GPTQ 4-bit (experimental) and the validators' quantised-format rules
 ccslm/package.py    slm_repo + validator checks + efficiency inputs
@@ -123,6 +124,10 @@ Then follow RUNBOOK.md on a GPU instance.
 
 ## Gotchas found while building
 
+- The Mamba training kernels must be real packages: transformers uses hub `kernels` only when asked, so with just
+  `kernels` installed it falls back to the reference PyTorch scan, which runs out of memory at 16k tokens.
+  `setup_gpu.sh` builds `causal-conv1d` and `mamba-ssm` from source with `--no-deps` (mamba-ssm would downgrade vLLM's
+  `tilelang`/`apache-tvm-ffi` pins).
 - transformers 5 saves Granite's config with renamed layer types (`linear_attention`/`full_attention`),
   `dtype` instead of `torch_dtype` and `time_step_limit: [0.0, {"__float__": "Infinity"}]`. Every exported model
   gets the base's own `config.json` back (`common.portable_config`); `package` refuses any other difference.

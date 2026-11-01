@@ -7,6 +7,9 @@ MODEL=${1:?model folder}
 PORT=${2:-8000}
 shift $(( $# >= 2 ? 2 : $# ))
 export VLLM_BATCH_INVARIANT=1 VLLM_NO_USAGE_STATS=1
+# the project venv's vllm, so this works without activating it (pm2, cron, a plain shell)
+VENV_BIN="$(cd "$(dirname "$0")/.." && pwd)/.venv/bin"
+[[ -x "$VENV_BIN/vllm" ]] && export PATH="$VENV_BIN:$PATH"
 exec vllm serve "$MODEL" \
   --served-model-name slm \
   --host 127.0.0.1 --port "$PORT" \

@@ -20,6 +20,9 @@ transformers = pytest.importorskip("transformers")
 
 ROOT = Path(__file__).resolve().parent.parent
 LAYERS = 12
+# With mamba_ssm and causal_conv1d installed transformers runs the Mamba layers on their CUDA
+# kernels whatever the tensor's device, so the tiny model trains on the GPU when there is one.
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 ATTENTION = (5,)
 
 
@@ -51,8 +54,8 @@ def tiny(tmp_path_factory: pytest.TempPathFactory) -> Path:
         num_key_value_heads=2,
         num_hidden_layers=LAYERS,
         layer_types=["attention" if i in ATTENTION else "mamba" for i in range(LAYERS)],
-        mamba_n_heads=4,
-        mamba_d_head=32,
+        mamba_n_heads=8,  # in_proj width 296: causal_conv1d needs strides in multiples of 8
+        mamba_d_head=16,
         mamba_d_state=16,
         mamba_chunk_size=32,
     )
@@ -96,7 +99,7 @@ def test_train_merge_prune_package(tiny: Path, tmp_path: Path) -> None:
     run(
         ["ccslm.train", "--pairs", str(pairs), "--eval", str(pairs), "--model", str(tiny), "--out", str(run_dir),
          "--method", "lora", "--rank", "4", "--accumulate", "2", "--max-steps", "2", "--save-every", "1",
-         "--eval-every", "2", "--eval-items", "2", "--device", "cpu", "--dtype", "fp32", "--lr", "5e-3"],
+         "--eval-every", "2", "--eval-items", "2", "--device", DEVICE, "--dtype", "fp32", "--lr", "5e-3"],
         env,
     )
     merged = run_dir / "merged"
@@ -122,7 +125,7 @@ def test_train_merge_prune_package(tiny: Path, tmp_path: Path) -> None:
     # resume continues from the checkpoint instead of starting over
     run(
         ["ccslm.train", "--pairs", str(pairs), "--model", str(tiny), "--out", str(run_dir), "--method", "lora",
-         "--rank", "4", "--accumulate", "2", "--max-steps", "3", "--device", "cpu", "--dtype", "fp32", "--resume", "--no-export"],
+         "--rank", "4", "--accumulate", "2", "--max-steps", "3", "--device", DEVICE, "--dtype", "fp32", "--resume", "--no-export"],
         env,
     )
     steps = [json.loads(line)["step"] for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
@@ -149,8 +152,8 @@ def test_train_merge_prune_package(tiny: Path, tmp_path: Path) -> None:
         assert torch.equal(tensor(pruned, f"model.layers.{i}.input_layernorm.weight"), tensor(merged, f"model.layers.{i}.input_layernorm.weight"))
     assert torch.equal(tensor(pruned, "model.layers.8.mamba.in_proj.weight"), tensor(merged, "model.layers.9.mamba.in_proj.weight"))
     assert torch.equal(tensor(pruned, "model.layers.9.mamba.in_proj.weight"), tensor(merged, "model.layers.11.mamba.in_proj.weight"))
-    model = transformers.AutoModelForCausalLM.from_pretrained(str(pruned), dtype=torch.float32)
-    out = model(input_ids=torch.tensor([[1, 2, 3, 4]]))
+    model = transformers.AutoModelForCausalLM.from_pretrained(str(pruned), dtype=torch.float32).to(DEVICE)
+    out = model(input_ids=torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]], device=DEVICE))
     assert out.logits.shape[-1] == config["vocab_size"]
 
     # attention layers and the protected first eight may never be cut
@@ -180,7 +183,7 @@ def test_train_merge_prune_package(tiny: Path, tmp_path: Path) -> None:
 def test_block_influence_scores_only_rank_candidates(tiny: Path, tmp_path: Path) -> None:
     env = {**os.environ, "CCSLM_BASE_DIR": str(tiny)}
     pairs = pairs_file(tmp_path)
-    run(["ccslm.prune", "score", "--model", str(tiny), "--pairs", str(pairs), "--samples", "3", "--device", "cpu", "--out", str(tmp_path / "scores")], env)
+    run(["ccslm.prune", "score", "--model", str(tiny), "--pairs", str(pairs), "--samples", "3", "--device", DEVICE, "--out", str(tmp_path / "scores")], env)
     found = json.loads((tmp_path / "scores" / "scores.json").read_text())
     assert len(found["scores"]) == LAYERS and found["samples"] == 3
     assert all(0.0 <= s <= 1.0 for s in found["scores"]) and any(s > 0 for s in found["scores"])
@@ -194,7 +197,7 @@ def test_full_fine_tune_updates_bf16_weights_through_fp32_masters(tiny: Path, tm
     pairs = pairs_file(tmp_path)
     run_dir = tmp_path / "full"
     common = ["ccslm.train", "--pairs", str(pairs), "--model", str(tiny), "--out", str(run_dir), "--method", "full",
-              "--optim", "adamw", "--accumulate", "2", "--device", "cpu", "--dtype", "bf16", "--lr", "1e-4"]
+              "--optim", "adamw", "--accumulate", "2", "--device", DEVICE, "--dtype", "bf16", "--lr", "1e-4"]
     run([*common, "--max-steps", "2", "--save-every", "1"], env)
     run([*common, "--max-steps", "3", "--resume"], env)
     steps = [json.loads(line)["step"] for line in (run_dir / "metrics.jsonl").read_text().splitlines()]

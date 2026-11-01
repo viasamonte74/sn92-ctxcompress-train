@@ -60,25 +60,37 @@ export CCSLM_PROBE_URL=http://127.0.0.1:8090
 
 ## 4. Train variant A (LoRA r=64)
 
-First a short run to see that it learns and to measure the speed:
+Needs the Mamba kernels (`mamba_ssm`, `causal_conv1d`, built by setup_gpu.sh): without them the
+reference PyTorch scan runs out of memory on one 16k token example and `ccslm.train` refuses to start.
+Measured on an RTX 6000 Ada 48 GB, LoRA r=64, batch 1 with gradient checkpointing: 16k tokens 5.8 s /
+13.4 GB, 32k 12.3 s / 20.1 GB, 64k 26.8 s / 33.4 GB, 100k 44.5 s / 48.3 GB, 126k out of memory. So on
+48 GB pass `--max-tokens 96000` (keeps 3,782 of 3,935 pairs); on 80 GB the default keeps all.
 
 ```
-CCSLM_TRAIN_ARGS="--max-steps 40" python -m ccslm.pipeline --stages train --variant A
-tail -f out/logs/train-A.log        # one json line per optimizer step: loss, sequence tokens, seconds, memory
+export HF_HOME=/workspace/hf PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export CCSLM_TRAIN_ARGS="--max-tokens 96000 --save-every 10 --eval-every 25 --eval-items 16"
+python -m ccslm.pipeline --stages train --variant A
+tail -f out/logs/train-A.log        # one json line per optimizer step: loss, lr, seconds, memory
 ```
 
-40 steps × 16 examples ≈ 640 examples ≈ 30M tokens. Read `elapsed_s` per step in
-`out/runs/A/metrics.jsonl` and scale: one epoch of ~4,000 pairs is ~250 steps. If the loss is
-already flat by step 40, evaluate before paying for more. To go on, clear the stage marker and run
-again; the checkpoint resumes:
+One epoch is ~236 optimizer steps of 16 examples, ~5 min a step on the 48 GB card (~20 h). The
+cosine schedule always spans the whole run; `--max-steps N` only stops early, so a stopped run
+resumes on the same curve. For a shorter run that still decays fully, pass the same
+`--schedule-steps N --max-steps N`.
+
+Checkpoints: every `--save-every` steps a numbered one lands in `out/runs/A/checkpoints/step-NNNNN`
+(the LoRA adapter, ~390 MB; `--keep-checkpoints K` keeps only the newest K), and
+`out/runs/A/checkpoint` holds the latest with the optimizer for resuming. An interruption is safe:
+rerun the same command (after `rm out/stages/train-A.done` if the stage finished) and it resumes.
 
 ```
-rm out/stages/train-A.done
-CCSLM_TRAIN_ARGS="--max-steps 250" python -m ccslm.pipeline --stages train --variant A
+python -m ccslm.export --run out/runs/A --list                       # step, loss, eval loss per checkpoint
+python -m ccslm.pipeline --stages export,eval --variant A --step 120  # merge step 120, grade it as A-s00120
+python -m ccslm.pipeline --stages report                             # every graded checkpoint side by side
 ```
 
-Out of memory: add `--max-tokens 64000` to `CCSLM_TRAIN_ARGS` (drops the longest examples).
-An interruption is safe: rerun the same command and it resumes from `out/runs/A/checkpoint`.
+The export runs on CPU in seconds, so it works while training holds the GPU; eval serves the model
+with vLLM and needs the GPU free (after training, or on a second card).
 
 ## 5. Evaluate and package A (~40 min)
 

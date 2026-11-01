@@ -70,6 +70,15 @@ def load_model(model_dir: Path, method: str, rank: int, device: str, dtype_name:
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[dtype_name]
     import importlib.util
 
+    if device.startswith("cuda"):
+        try:
+            import causal_conv1d  # noqa: F401
+            import mamba_ssm  # noqa: F401
+        except ImportError as exc:
+            # transformers would fall back to its reference PyTorch scan, which runs out of memory
+            # on a single 16k token example; see the kernel block in scripts/setup_gpu.sh.
+            raise SystemExit(f"Mamba training kernels missing ({exc}); run scripts/setup_gpu.sh") from exc
+
     flash = importlib.util.find_spec("flash_attn") is not None
     attention = "flash_attention_2" if flash and device.startswith("cuda") else "sdpa"
     model = AutoModelForCausalLM.from_pretrained(str(model_dir), dtype=dtype, attn_implementation=attention)
@@ -351,19 +360,39 @@ def main() -> None:
     while state["step"] < total_steps:
         for group in param_groups(optimizer):
             group["lr"] = lr_at(state["step"], schedule_steps, lr, warmup)
-        optimizer.zero_grad(set_to_none=True)
-        batch = order[state["cursor"] : state["cursor"] + args.accumulate]
-        tokens = sum(len(train_rows[i]["completion"]) for i in batch)
-        for i in batch:
-            loss, n = completion_loss(model, train_rows[i], device)
-            (loss / tokens).backward()
-            window_loss += float(loss)
-            window_tokens += n
-            window_seq += len(train_rows[i]["prompt"]) + n
+        span = order[state["cursor"] : state["cursor"] + args.accumulate]
+        skipped = state.setdefault("skipped", [])
+        while True:
+            # An example that runs out of memory is skipped for good (kept in the state, so a resume
+            # skips it too) and the batch is redone without it: a partial backward leaves gradients
+            # that cannot be told apart from the rest of the batch.
+            optimizer.zero_grad(set_to_none=True)
+            batch = [i for i in span if i not in skipped]
+            tokens = sum(len(train_rows[i]["completion"]) for i in batch)
+            window_loss, window_tokens, window_seq = 0.0, 0, 0
+            failed = None
+            for i in batch:
+                try:
+                    loss, n = completion_loss(model, train_rows[i], device)
+                    (loss / tokens).backward()
+                except torch.OutOfMemoryError:
+                    failed = i
+                    break
+                window_loss += float(loss.detach())
+                window_tokens += n
+                window_seq += len(train_rows[i]["prompt"]) + n
+            if failed is None:
+                break
+            loss = None
+            optimizer.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            skipped.append(failed)
+            seq = len(train_rows[failed]["prompt"]) + len(train_rows[failed]["completion"])
+            log(f"out of memory on {train_rows[failed]['id']} ({seq} tokens): skipped, redoing step {state['step'] + 1}")
         norm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
         optimizer.step()
         state["step"] += 1
-        state["cursor"] += len(batch)
+        state["cursor"] += len(span)
         state["seen_tokens"] += window_seq
         row: dict[str, Any] = {
             "step": state["step"],
